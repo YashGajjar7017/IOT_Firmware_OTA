@@ -1,14 +1,14 @@
 /*
  * ============================================================
- *  ESP32-S3 Gateway Diagnostic  v2.0
+ *  ESP32-S3 Gateway Diagnostic  v3.0
  *  WiFi Access-Point  +  Web GUI  +  Module Tests  +  OTA
  * ============================================================
  *
  *  HOW TO USE
  *  1. Flash this firmware via Arduino IDE or esptool.
  *  2. On your phone / laptop, connect to Wi-Fi:
- *       SSID : GatewayDiag
- *       Pass : gateway123
+ *       SSID : Esp32_Channel_Network's
+ *       Pass : esp32
  *  3. Open browser → http://192.168.4.1
  *  4. Click "Run All Tests" or individual module buttons.
  *  5. OTA: drop a .bin in the OTA section → Flash Firmware.
@@ -61,25 +61,28 @@ const uint8_t DI_PINS[DI_COUNT] = {38, 39, 40, 41};
 // ============================================================
 //  MODBUS / SERIAL CONFIG
 // ============================================================
-#define MODBUS_BAUD 9600
-#define MODBUS_CFG SERIAL_8N1
+#define MODBUS_BAUD       9600
+#define MODBUS_CFG        SERIAL_8N1
 #define MODBUS_TIMEOUT_MS 1200
-#define MODBUS_GAP_MS 40
-#define MODBUS_FC03 0x03 // Read Holding Registers
+#define MODBUS_GAP_MS     40
+#define MODBUS_FC03       0x03 // Read Holding Registers
 
 // FR-meter slave
-#define FR_SLAVE_ID 1
-#define FR_START_REG 0
-#define FR_REG_COUNT 2
+#define FR_SLAVE_ID   1
+#define FR_START_REG  0
+#define FR_REG_COUNT  2
+
+// Continuous-send test duration (ms) – RS232 & RS485
+#define CONT_TEST_MS  5000   // 5 seconds
+#define CONT_INTERVAL 500    // send every 500 ms
 
 // GPRS modem
-#define GPRS_BAUD_RATE 115200
+#define GPRS_BAUD_RATE    115200
 #define GPRS_AT_TIMEOUT_MS 2000
 
 // ============================================================
 //  WI-FI ACCESS POINT
-// ============================================================\
-
+// ============================================================
 #define AP_SSID "Esp32_Channel_Network's"
 #define AP_PASS "esp32"
 
@@ -87,40 +90,45 @@ const uint8_t DI_PINS[DI_COUNT] = {38, 39, 40, 41};
 //  TEST IDs
 // ============================================================
 enum TestID : int {
-  T_RS232 = 0,
-  T_RS485 = 1,
-  T_GPRS = 2,
-  T_DI = 3,
-  T_PSRAM = 4,
-  T_RTC = 5,
+  T_RS232   = 0,
+  T_RS485   = 1,
+  T_GPRS    = 2,
+  T_DI      = 3,
+  T_PSRAM   = 4,
+  T_RTC     = 5,
   T_WINBOND = 6,
-  T_COUNT = 7
+  T_FR      = 7,
+  T_COUNT   = 8
 };
 
 enum TestStatus : uint8_t { S_PENDING, S_PASS, S_WARN, S_FAIL, S_SKIP };
 
 struct TestResult {
   const char *name;
-  TestStatus status;
-  String detail;
+  TestStatus  status;
+  String      detail;
 };
 
 // ============================================================
 //  GLOBALS
 // ============================================================
 RTC_DS1307 rtc;
-WebServer server(80);
+WebServer  server(80);
 
 TestResult results[T_COUNT] = {
-    {"RS232", S_PENDING, "Not tested"},   {"RS485", S_PENDING, "Not tested"},
-    {"GPRS", S_PENDING, "Not tested"},    {"DI", S_PENDING, "Not tested"},
-    {"PSRAM", S_PENDING, "Not tested"},   {"RTC", S_PENDING, "Not tested"},
+    {"RS232",   S_PENDING, "Not tested"},
+    {"RS485",   S_PENDING, "Not tested"},
+    {"GPRS",    S_PENDING, "Not tested"},
+    {"DI",      S_PENDING, "Not tested"},
+    {"PSRAM",   S_PENDING, "Not tested"},
+    {"RTC",     S_PENDING, "Not tested"},
     {"Winbond", S_PENDING, "Not tested"},
+    {"FR",      S_PENDING, "Not tested"},
 };
 
-volatile bool testRunning = false;
-volatile bool pendingAll = false;
-volatile int pendingTestID = -1;
+volatile bool testRunning  = false;
+volatile bool pendingAll   = false;
+volatile int  pendingTestID = -1;
 
 // Circular log buffer (last LOG_MAX_BYTES of output)
 #define LOG_MAX_BYTES 4096
@@ -154,16 +162,11 @@ void logFmt(const char *fmt, ...) {
 // ============================================================
 const char *statusStr(TestStatus s) {
   switch (s) {
-  case S_PASS:
-    return "PASS";
-  case S_WARN:
-    return "WARN";
-  case S_FAIL:
-    return "FAIL";
-  case S_SKIP:
-    return "SKIP";
-  default:
-    return "PENDING";
+  case S_PASS:  return "PASS";
+  case S_WARN:  return "WARN";
+  case S_FAIL:  return "FAIL";
+  case S_SKIP:  return "SKIP";
+  default:      return "PENDING";
   }
 }
 
@@ -177,16 +180,14 @@ void setResult(TestID id, TestStatus status, const String &detail) {
 //  SERIAL HELPERS
 // ============================================================
 void drain(HardwareSerial &p) {
-  while (p.available())
-    p.read();
+  while (p.available()) p.read();
 }
 
 String hexStr(const uint8_t *d, size_t n) {
   String s;
   char h[4];
   for (size_t i = 0; i < n; i++) {
-    if (i)
-      s += ' ';
+    if (i) s += ' ';
     snprintf(h, sizeof(h), "%02X", d[i]);
     s += h;
   }
@@ -196,20 +197,18 @@ String hexStr(const uint8_t *d, size_t n) {
 // Read bytes until inter-frame gap or timeout
 size_t readFrame(HardwareSerial &p, uint8_t *buf, size_t maxLen,
                  uint32_t timeoutMs, uint32_t gapMs) {
-  size_t n = 0;
-  bool seen = false;
-  uint32_t t0 = millis();
-  uint32_t tl = t0;
+  size_t   n    = 0;
+  bool     seen = false;
+  uint32_t t0   = millis();
+  uint32_t tl   = t0;
   while (millis() - t0 < timeoutMs) {
     while (p.available()) {
       int b = p.read();
-      if (b >= 0 && n < maxLen)
-        buf[n++] = (uint8_t)b;
+      if (b >= 0 && n < maxLen) buf[n++] = (uint8_t)b;
       seen = true;
-      tl = millis();
+      tl   = millis();
     }
-    if (seen && (millis() - tl) >= gapMs)
-      break;
+    if (seen && (millis() - tl) >= gapMs) break;
     delay(1);
   }
   return n;
@@ -256,20 +255,23 @@ uint16_t crc16(const uint8_t *d, size_t n) {
 }
 
 bool crcOK(const uint8_t *f, size_t n) {
-  if (n < 4)
-    return false;
+  if (n < 4) return false;
   uint16_t rx = f[n - 2] | ((uint16_t)f[n - 1] << 8);
   return rx == crc16(f, n - 2);
 }
 
 // ============================================================
-//  TEST — RS232  (Modbus RTU via FR Meter on Serial2)
+//  TEST — RS232
+//  Sends a known loopback probe for CONT_TEST_MS.
+//  The TX byte is echoed back only when the cable is physically
+//  connected (full loopback). If no echo is received → FAIL.
+//  Ensures a removed cable cannot produce a false PASS.
 // ============================================================
 void testRS232() {
   testRunning = true;
   setResult(T_RS232, S_PENDING, "Running…");
   logLine();
-  logLn("RS232 · MODBUS RTU TEST");
+  logLn("RS232 · LOOPBACK + MODBUS TEST (5 s)");
 
   muxRS232();
   Serial2.end();
@@ -278,73 +280,101 @@ void testRS232() {
   Serial2.flush();
   delay(10);
 
-  // Build FC03 request
+  // ── Phase 1: Pure loopback probe ──────────────────────────
+  // Send a single unique byte; if cable is connected the UART
+  // TX is wired back to RX (hardware loopback) and we get it
+  // back. Without cable there is no return path → no echo.
+  const uint8_t PROBE_BYTE = 0xA5;
+  drain(Serial2);
+  Serial2.write(PROBE_BYTE);
+  Serial2.flush();
+
+  bool cableOK = false;
+  uint32_t lbEnd = millis() + 300; // 300 ms for echo
+  while (millis() < lbEnd) {
+    if (Serial2.available()) {
+      uint8_t b = Serial2.read();
+      if (b == PROBE_BYTE) { cableOK = true; break; }
+    }
+    delay(1);
+  }
+
+  if (!cableOK) {
+    logLn("Loopback probe: no echo → cable not connected");
+    setResult(T_RS232, S_FAIL, "Cable not connected — no loopback echo received");
+    testRunning = false;
+    return;
+  }
+  logLn("Loopback probe: echo OK → cable present");
+
+  // ── Phase 2: Continuous Modbus FC03 sends for 5 s ─────────
   uint8_t req[8] = {(uint8_t)FR_SLAVE_ID,
                     MODBUS_FC03,
                     highByte(FR_START_REG),
                     lowByte(FR_START_REG),
                     highByte(FR_REG_COUNT),
                     lowByte(FR_REG_COUNT),
-                    0,
-                    0};
+                    0, 0};
   uint16_t c = crc16(req, 6);
   req[6] = lowByte(c);
   req[7] = highByte(c);
 
-  logFmt("Req : %s\n", hexStr(req, 8).c_str());
-  drain(Serial2);
-  Serial2.write(req, 8);
-  Serial2.flush();
+  int      attempts = 0, passes = 0;
+  uint32_t deadline = millis() + CONT_TEST_MS;
 
-  uint8_t resp[128];
-  size_t rn =
-      readFrame(Serial2, resp, sizeof(resp), MODBUS_TIMEOUT_MS, MODBUS_GAP_MS);
+  while (millis() < deadline) {
+    attempts++;
+    logFmt("Attempt %d  Req: %s\n", attempts, hexStr(req, 8).c_str());
+    drain(Serial2);
+    Serial2.write(req, 8);
+    Serial2.flush();
 
-  if (rn == 0) {
-    setResult(T_RS232, S_FAIL, "No response — check wiring & slave power");
-    testRunning = false;
-    return;
-  }
-  logFmt("Resp: %s (%u bytes)\n", hexStr(resp, rn).c_str(), (unsigned)rn);
-
-  // Scan for valid Modbus frame
-  for (size_t o = 0; o + 5 <= rn; o++) {
-    if (resp[o] != (uint8_t)FR_SLAVE_ID)
-      continue;
-    uint8_t fc = resp[o + 1];
-    if (fc == (MODBUS_FC03 | 0x80)) {
-      if (crcOK(resp + o, 5))
-        setResult(T_RS232, S_FAIL, "Exception code=" + String(resp[o + 2]));
-      continue;
+    uint8_t resp[128];
+    size_t  rn = readFrame(Serial2, resp, sizeof(resp),
+                            MODBUS_TIMEOUT_MS, MODBUS_GAP_MS);
+    if (rn > 0) {
+      logFmt("       Resp: %s (%u B)\n", hexStr(resp, rn).c_str(), (unsigned)rn);
+      // Validate frame
+      for (size_t o = 0; o + 5 <= rn; o++) {
+        if (resp[o] != (uint8_t)FR_SLAVE_ID) continue;
+        uint8_t fc = resp[o + 1];
+        if (fc != MODBUS_FC03) continue;
+        uint8_t bc = resp[o + 2];
+        if (o + 5 + bc > rn || !crcOK(resp + o, 5 + bc)) continue;
+        passes++;
+        break;
+      }
+    } else {
+      logLn("       No response");
     }
-    if (fc != MODBUS_FC03)
-      continue;
-    uint8_t bc = resp[o + 2];
-    if (o + 5 + bc > rn || !crcOK(resp + o, 5 + bc))
-      continue;
-    String d;
-    for (uint16_t i = 0; i < bc / 2; i++) {
-      if (i)
-        d += ", ";
-      uint16_t v = ((uint16_t)resp[o + 3 + i * 2] << 8) | resp[o + 4 + i * 2];
-      d += "R" + String(FR_START_REG + i) + "=" + String(v);
+    // Pace sends
+    uint32_t nextSend = millis() + CONT_INTERVAL;
+    while (millis() < nextSend && millis() < deadline) {
+      server.handleClient();
+      delay(1);
     }
-    setResult(T_RS232, S_PASS, "slave=" + String(FR_SLAVE_ID) + " | " + d);
-    testRunning = false;
-    return;
   }
-  setResult(T_RS232, S_FAIL, "Invalid / corrupt response");
+
+  if (passes > 0) {
+    setResult(T_RS232, S_PASS,
+              "Loopback OK | Modbus responses: " + String(passes) +
+              "/" + String(attempts));
+  } else {
+    setResult(T_RS232, S_WARN,
+              "Cable OK (loopback echo) | No Modbus device replied (" +
+              String(attempts) + " attempts)");
+  }
   testRunning = false;
 }
 
 // ============================================================
-//  TEST — RS485  (Modbus Diagnostics loopback on Serial2)
+//  TEST — RS485  (continuous 5-second bus probe)
 // ============================================================
 void testRS485() {
   testRunning = true;
   setResult(T_RS485, S_PENDING, "Running…");
   logLine();
-  logLn("RS485 · MODBUS BUS TEST");
+  logLn("RS485 · MODBUS BUS TEST (5 s continuous)");
 
   muxRS485();
   Serial2.end();
@@ -352,48 +382,67 @@ void testRS485() {
   Serial2.begin(9600, SERIAL_8N1, RS485_RX, RS485_TX);
   delay(100);
 
-  // FC08 sub-function 0 — "Return Query Data" (echo loopback)
+  // FC08 sub-function 0 — "Return Query Data" (echo/diagnostic)
   uint8_t req[8] = {0x01, 0x08, 0x00, 0x00, 0xA5, 0x37, 0, 0};
   uint16_t c = crc16(req, 6);
   req[6] = lowByte(c);
   req[7] = highByte(c);
 
-  logFmt("Req : %s\n", hexStr(req, 8).c_str());
-  drain(Serial2);
-  Serial2.write(req, 8);
-  Serial2.flush();
+  int      attempts = 0, passes = 0;
+  uint32_t deadline = millis() + CONT_TEST_MS;
 
-  uint8_t resp[128];
-  size_t rn =
-      readFrame(Serial2, resp, sizeof(resp), MODBUS_TIMEOUT_MS, MODBUS_GAP_MS);
+  while (millis() < deadline) {
+    attempts++;
+    logFmt("Attempt %d  Req: %s\n", attempts, hexStr(req, 8).c_str());
+    drain(Serial2);
+    Serial2.write(req, 8);
+    Serial2.flush();
 
-  if (rn == 0) {
-    // No device, but MUX switching was OK
-    setResult(T_RS485, S_WARN, "MUX switched OK · no device responded on bus");
-    testRunning = false;
-    return;
+    uint8_t resp[128];
+    size_t  rn = readFrame(Serial2, resp, sizeof(resp),
+                            MODBUS_TIMEOUT_MS, MODBUS_GAP_MS);
+    if (rn > 0) {
+      logFmt("       Resp: %s (%u B)\n",
+             hexStr(resp, min(rn, (size_t)16)).c_str(), (unsigned)rn);
+      passes++;
+    } else {
+      logLn("       No response");
+    }
+
+    // Pace sends
+    uint32_t nextSend = millis() + CONT_INTERVAL;
+    while (millis() < nextSend && millis() < deadline) {
+      server.handleClient();
+      delay(1);
+    }
   }
-  logFmt("Resp: %s (%u bytes)\n", hexStr(resp, min(rn, (size_t)16)).c_str(),
-         (unsigned)rn);
-  setResult(T_RS485, S_PASS,
-            "Got " + String(rn) + "B: " + hexStr(resp, min(rn, (size_t)8)));
+
+  if (passes > 0) {
+    setResult(T_RS485, S_PASS,
+              "MUX OK | Device responded " + String(passes) +
+              "/" + String(attempts) + " times");
+  } else {
+    setResult(T_RS485, S_WARN,
+              "MUX switched OK · no device responded on bus (" +
+              String(attempts) + " attempts)");
+  }
   testRunning = false;
 }
 
 // ============================================================
 //  TEST — GPRS / LTE  (AT commands on Serial1)
+//  PASS criteria: modem replies OK to AT  (cable/power present)
 // ============================================================
 static String atRead(uint32_t ms) {
-  String r;
-  uint32_t t0 = millis();
-  bool seen = false;
+  String   r;
+  uint32_t t0   = millis();
+  bool     seen = false;
   while (millis() - t0 < ms) {
     while (Serial1.available()) {
-      r += (char)Serial1.read();
+      r   += (char)Serial1.read();
       seen = true;
     }
-    if (seen && millis() - t0 > 150)
-      break;
+    if (seen && millis() - t0 > 150) break;
     delay(1);
   }
   r.trim();
@@ -409,14 +458,11 @@ static String AT(const char *cmd, uint32_t ms = 1200) {
 
 static int parseCSQ(const String &r) {
   int s = r.indexOf("+CSQ:");
-  if (s < 0)
-    return -1;
+  if (s < 0) return -1;
   int p = s + 5;
-  while (p < (int)r.length() && (r[p] < '0' || r[p] > '9'))
-    p++;
+  while (p < (int)r.length() && (r[p] < '0' || r[p] > '9')) p++;
   int e = p;
-  while (e < (int)r.length() && r[e] >= '0' && r[e] <= '9')
-    e++;
+  while (e < (int)r.length() && r[e] >= '0' && r[e] <= '9') e++;
   return (e == p) ? -1 : r.substring(p, e).toInt();
 }
 
@@ -431,55 +477,134 @@ void testGPRS() {
   Serial1.begin(GPRS_BAUD_RATE, SERIAL_8N1, GPRS_RX, GPRS_TX);
   delay(300);
 
-  // Wait for modem ready
+  // ── Step 1: Basic AT handshake ─────────────────────────────
+  // If ANY attempt gets OK → modem is alive → PASS base
   bool alive = false;
+  String atResp;
   for (int i = 0; i < 3 && !alive; i++) {
-    String r = AT("AT", 1000);
-    logFmt("AT -> %s\n", r.c_str());
-    if (r.indexOf("OK") >= 0)
-      alive = true;
-    else
-      delay(400);
+    atResp = AT("AT", 1000);
+    logFmt("AT[%d] -> %s\n", i + 1, atResp.c_str());
+    if (atResp.indexOf("OK") >= 0) { alive = true; break; }
+    delay(400);
   }
+
   if (!alive) {
-    setResult(T_GPRS, S_FAIL, "No AT response — check modem power/wiring");
+    setResult(T_GPRS, S_FAIL,
+              "No AT response — check modem power/wiring | "
+              "Baud=" + String(GPRS_BAUD_RATE));
     testRunning = false;
     return;
   }
 
+  // Modem responded — already qualifies as PASS
+  // Gather extra detail (best-effort, failures don't change status)
   AT("ATE0", 500); // echo off
 
-  String sim = AT("AT+CPIN?", GPRS_AT_TIMEOUT_MS);
-  String csqR = AT("AT+CSQ", GPRS_AT_TIMEOUT_MS);
-  String creg = AT("AT+CREG?", GPRS_AT_TIMEOUT_MS);
-  String icc = AT("AT+ICCID", GPRS_AT_TIMEOUT_MS);
+  String simR  = AT("AT+CPIN?",  GPRS_AT_TIMEOUT_MS);
+  String csqR  = AT("AT+CSQ",    GPRS_AT_TIMEOUT_MS);
+  String cregR = AT("AT+CREG?",  GPRS_AT_TIMEOUT_MS);
+  String cgmiR = AT("AT+CGMI",   GPRS_AT_TIMEOUT_MS); // manufacturer
+  String cgsn  = AT("AT+CGSN",   GPRS_AT_TIMEOUT_MS); // IMEI
 
-  logFmt("CPIN : %s\n", sim.c_str());
+  logFmt("CPIN : %s\n", simR.c_str());
   logFmt("CSQ  : %s\n", csqR.c_str());
-  logFmt("CREG : %s\n", creg.c_str());
+  logFmt("CREG : %s\n", cregR.c_str());
+  logFmt("CGMI : %s\n", cgmiR.c_str());
 
-  int csqV = parseCSQ(csqR);
-  bool simOK = sim.indexOf("READY") >= 0;
-  bool regOK = creg.indexOf(",1") >= 0 || creg.indexOf(",5") >= 0;
+  int  csqV   = parseCSQ(csqR);
+  bool simOK  = simR.indexOf("READY") >= 0;
+  bool regOK  = cregR.indexOf(",1") >= 0 || cregR.indexOf(",5") >= 0;
+
   const char *sigQ = (csqV < 0 || csqV == 99) ? "??"
-                     : csqV < 10              ? "LOW"
-                     : csqV < 15              ? "OK"
-                     : csqV < 20              ? "GOOD"
-                                              : "STRONG";
+                     : csqV < 10               ? "LOW"
+                     : csqV < 15               ? "OK"
+                     : csqV < 20               ? "GOOD"
+                                               : "STRONG";
 
-  char d[120];
-  snprintf(d, sizeof(d), "SIM=%s | CSQ=%d(%ddBm,%s) | NET=%s",
-           simOK ? "OK" : "FAIL", csqV,
-           (csqV >= 0 && csqV != 99) ? -113 + 2 * csqV : 0, sigQ,
-           regOK ? "REG" : "UNREG");
-
-  if (!simOK)
-    setResult(T_GPRS, S_FAIL, String(d));
-  else if (!regOK || (csqV >= 0 && csqV < 10))
-    setResult(T_GPRS, S_WARN, String(d));
+  // Build detail string
+  String detail = "Modem:OK";
+  if (simOK)  detail += " | SIM:READY";
+  else        detail += " | SIM:NOT-READY";
+  if (csqV >= 0 && csqV != 99)
+    detail += " | CSQ:" + String(csqV) + "(" + String(-113 + 2 * csqV) + "dBm," + sigQ + ")";
   else
-    setResult(T_GPRS, S_PASS, String(d));
+    detail += " | CSQ:N/A";
+  detail += regOK ? " | NET:REG" : " | NET:UNREG";
 
+  // PASS as long as modem responded (simOK and regOK are bonuses)
+  setResult(T_GPRS, S_PASS, detail);
+  testRunning = false;
+}
+
+// ============================================================
+//  TEST — FR Meter  (Modbus RTU on RS232 / Serial2)
+//  Dedicated section separate from raw RS232 loopback test.
+// ============================================================
+void testFR() {
+  testRunning = true;
+  setResult(T_FR, S_PENDING, "Running…");
+  logLine();
+  logLn("FR METER · MODBUS RTU TEST");
+
+  muxRS232();
+  Serial2.end();
+  delay(20);
+  Serial2.begin(MODBUS_BAUD, MODBUS_CFG, RS232_RX, RS232_TX);
+  Serial2.flush();
+  delay(10);
+
+  uint8_t req[8] = {(uint8_t)FR_SLAVE_ID,
+                    MODBUS_FC03,
+                    highByte(FR_START_REG),
+                    lowByte(FR_START_REG),
+                    highByte(FR_REG_COUNT),
+                    lowByte(FR_REG_COUNT),
+                    0, 0};
+  uint16_t c = crc16(req, 6);
+  req[6] = lowByte(c);
+  req[7] = highByte(c);
+
+  logFmt("Slave ID: %d  Regs: %d..%d\n",
+         FR_SLAVE_ID, FR_START_REG, FR_START_REG + FR_REG_COUNT - 1);
+  logFmt("Req : %s\n", hexStr(req, 8).c_str());
+  drain(Serial2);
+  Serial2.write(req, 8);
+  Serial2.flush();
+
+  uint8_t resp[128];
+  size_t  rn = readFrame(Serial2, resp, sizeof(resp),
+                          MODBUS_TIMEOUT_MS, MODBUS_GAP_MS);
+
+  if (rn == 0) {
+    setResult(T_FR, S_FAIL, "No response — check wiring & FR slave power");
+    testRunning = false;
+    return;
+  }
+  logFmt("Resp: %s (%u bytes)\n", hexStr(resp, rn).c_str(), (unsigned)rn);
+
+  for (size_t o = 0; o + 5 <= rn; o++) {
+    if (resp[o] != (uint8_t)FR_SLAVE_ID) continue;
+    uint8_t fc = resp[o + 1];
+    if (fc == (MODBUS_FC03 | 0x80)) {
+      if (crcOK(resp + o, 5))
+        setResult(T_FR, S_FAIL, "Exception code=" + String(resp[o + 2]));
+      continue;
+    }
+    if (fc != MODBUS_FC03) continue;
+    uint8_t bc = resp[o + 2];
+    if (o + 5 + bc > rn || !crcOK(resp + o, 5 + bc)) continue;
+    String d;
+    for (uint16_t i = 0; i < bc / 2; i++) {
+      if (i) d += ", ";
+      uint16_t v = ((uint16_t)resp[o + 3 + i * 2] << 8) | resp[o + 4 + i * 2];
+      d += "R" + String(FR_START_REG + i) + "=" + String(v);
+    }
+    setResult(T_FR, S_PASS,
+              "slave=" + String(FR_SLAVE_ID) + " | " + d);
+    testRunning = false;
+    return;
+  }
+  setResult(T_FR, S_FAIL, "Invalid / corrupt response");
   testRunning = false;
 }
 
@@ -497,8 +622,7 @@ void testDI() {
     pinMode(DI_PINS[i], INPUT_PULLUP);
     delay(5);
     int v = digitalRead(DI_PINS[i]);
-    if (i)
-      d += " | ";
+    if (i) d += " | ";
     d += "DI" + String(i + 1) + "(G" + String(DI_PINS[i]) +
          ")=" + (v ? "H" : "L");
     logFmt("DI%d  GPIO%u = %s\n", i + 1, (unsigned)DI_PINS[i],
@@ -518,8 +642,7 @@ void testPSRAM() {
   logLn("PSRAM TEST");
 
   if (!psramInit()) {
-    setResult(T_PSRAM, S_WARN,
-              "PSRAM not present or not enabled in this build");
+    setResult(T_PSRAM, S_WARN, "PSRAM not present or not enabled in this build");
     testRunning = false;
     return;
   }
@@ -535,16 +658,10 @@ void testPSRAM() {
     return;
   }
 
-  // Write pattern
-  for (size_t i = 0; i < PROBE; i++)
-    probe[i] = (uint8_t)(i & 0xFF);
-  // Verify
+  for (size_t i = 0; i < PROBE; i++) probe[i] = (uint8_t)(i & 0xFF);
   bool ok = true;
   for (size_t i = 0; i < PROBE; i++) {
-    if (probe[i] != (uint8_t)(i & 0xFF)) {
-      ok = false;
-      break;
-    }
+    if (probe[i] != (uint8_t)(i & 0xFF)) { ok = false; break; }
   }
   free(probe);
 
@@ -570,7 +687,6 @@ void testRTC() {
   Wire.begin();
 #endif
 
-  // Scan I2C bus
   uint8_t found = 0;
   for (uint8_t a = 1; a < 127; a++) {
     Wire.beginTransmission(a);
@@ -597,8 +713,9 @@ void testRTC() {
 
   DateTime now = rtc.now();
   char d[40];
-  snprintf(d, sizeof(d), "%04u-%02u-%02u %02u:%02u:%02u", now.year(),
-           now.month(), now.day(), now.hour(), now.minute(), now.second());
+  snprintf(d, sizeof(d), "%04u-%02u-%02u %02u:%02u:%02u",
+           now.year(), now.month(), now.day(),
+           now.hour(), now.minute(), now.second());
   setResult(T_RTC, S_PASS, String(d));
   testRunning = false;
 }
@@ -639,6 +756,7 @@ void runAllTests() {
   testPSRAM();
   testRTC();
   testWinbond();
+  testFR();
   logLine();
   logLn("=== ALL TESTS COMPLETE ===");
   logLine();
@@ -646,29 +764,15 @@ void runAllTests() {
 
 void dispatchTest(int id) {
   switch (id) {
-  case T_RS232:
-    testRS232();
-    break;
-  case T_RS485:
-    testRS485();
-    break;
-  case T_GPRS:
-    testGPRS();
-    break;
-  case T_DI:
-    testDI();
-    break;
-  case T_PSRAM:
-    testPSRAM();
-    break;
-  case T_RTC:
-    testRTC();
-    break;
-  case T_WINBOND:
-    testWinbond();
-    break;
-  default:
-    break;
+  case T_RS232:   testRS232();   break;
+  case T_RS485:   testRS485();   break;
+  case T_GPRS:    testGPRS();    break;
+  case T_DI:      testDI();      break;
+  case T_PSRAM:   testPSRAM();   break;
+  case T_RTC:     testRTC();     break;
+  case T_WINBOND: testWinbond(); break;
+  case T_FR:      testFR();      break;
+  default: break;
   }
 }
 
@@ -680,8 +784,7 @@ String buildJSON() {
   j += testRunning ? "true" : "false";
   j += ",\"tests\":[";
   for (int i = 0; i < T_COUNT; i++) {
-    if (i)
-      j += ",";
+    if (i) j += ",";
     String d = results[i].detail;
     d.replace("\\", "\\\\");
     d.replace("\"", "\\\"");
@@ -703,23 +806,19 @@ String buildJSON() {
 //  ROUTE HANDLERS
 // ============================================================
 
-// GET /  → serve dashboard HTML from PROGMEM
-void onRoot() { server.send_P(200, "text/html", index_html); }
+void onRoot()    { server.send_P(200, "text/html", index_html); }
 
-// GET /results  → JSON test results
 void onResults() {
   server.sendHeader("Cache-Control", "no-cache, no-store");
   server.send(200, "application/json", buildJSON());
 }
 
-// GET /log  → raw diagnostic log text
 void onLog() {
   server.sendHeader("Cache-Control", "no-cache, no-store");
   server.send(200, "text/plain; charset=utf-8",
               logBuf.length() ? logBuf : "No log yet.");
 }
 
-// GET /run?test=<name>  → queue a test (async, returns immediately)
 void onRun() {
   if (testRunning) {
     server.send(429, "application/json", "{\"error\":\"busy\"}");
@@ -728,23 +827,16 @@ void onRun() {
   String t = server.arg("test");
   t.toLowerCase();
 
-  if (t == "all") {
-    pendingAll = true;
-  } else if (t == "rs232") {
-    pendingTestID = T_RS232;
-  } else if (t == "rs485") {
-    pendingTestID = T_RS485;
-  } else if (t == "gprs") {
-    pendingTestID = T_GPRS;
-  } else if (t == "di") {
-    pendingTestID = T_DI;
-  } else if (t == "psram") {
-    pendingTestID = T_PSRAM;
-  } else if (t == "rtc") {
-    pendingTestID = T_RTC;
-  } else if (t == "winbond") {
-    pendingTestID = T_WINBOND;
-  } else {
+  if      (t == "all")     pendingAll    = true;
+  else if (t == "rs232")   pendingTestID = T_RS232;
+  else if (t == "rs485")   pendingTestID = T_RS485;
+  else if (t == "gprs")    pendingTestID = T_GPRS;
+  else if (t == "di")      pendingTestID = T_DI;
+  else if (t == "psram")   pendingTestID = T_PSRAM;
+  else if (t == "rtc")     pendingTestID = T_RTC;
+  else if (t == "winbond") pendingTestID = T_WINBOND;
+  else if (t == "fr")      pendingTestID = T_FR;
+  else {
     server.send(400, "application/json", "{\"error\":\"unknown test\"}");
     return;
   }
@@ -769,7 +861,7 @@ void onOTAUpload() {
   }
 }
 
-// OTA — completion handler (called once after upload finishes)
+// OTA — completion handler
 void onOTADone() {
   bool ok = !Update.hasError();
   if (ok) {
@@ -788,9 +880,10 @@ void onOTADone() {
 void onInfo() {
   char buf[300];
   snprintf(buf, sizeof(buf),
-           "{\"fw\":\"2.0\",\"chip\":\"ESP32-S3\","
+           "{\"fw\":\"3.0\",\"chip\":\"ESP32-S3\","
            "\"heap\":%u,\"psram\":%u,\"clients\":%u}",
-           (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram(),
+           (unsigned)ESP.getFreeHeap(),
+           (unsigned)ESP.getFreePsram(),
            (unsigned)WiFi.softAPgetStationNum());
   server.send(200, "application/json", String(buf));
 }
@@ -809,24 +902,24 @@ void setup() {
   delay(500);
 
   logLine();
-  logLn("ESP32-S3 Gateway Diagnostic v2.0");
+  logLn("ESP32-S3 Gateway Diagnostic v3.0");
   logLn("Booting WiFi AP + Web Server…");
   logLine();
 
-  // ── Wi-Fi Access Point ───────────────────────────────────
+  // ── Wi-Fi Access Point ─────────────────────────────────────
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASS);
   IPAddress ip = WiFi.softAPIP();
   logFmt("AP  : SSID=%s  PASS=%s\n", AP_SSID, AP_PASS);
   logFmt("URL : http://%s\n", ip.toString().c_str());
 
-  // ── Web routes ───────────────────────────────────────────
-  server.on("/", HTTP_GET, onRoot);
-  server.on("/results", HTTP_GET, onResults);
-  server.on("/log", HTTP_GET, onLog);
-  server.on("/run", HTTP_GET, onRun);
-  server.on("/info", HTTP_GET, onInfo);
-  server.on("/ota", HTTP_POST, onOTADone, onOTAUpload);
+  // ── Web routes ─────────────────────────────────────────────
+  server.on("/",        HTTP_GET,  onRoot);
+  server.on("/results", HTTP_GET,  onResults);
+  server.on("/log",     HTTP_GET,  onLog);
+  server.on("/run",     HTTP_GET,  onRun);
+  server.on("/info",    HTTP_GET,  onInfo);
+  server.on("/ota",     HTTP_POST, onOTADone, onOTAUpload);
   server.onNotFound([]() { server.send(404, "text/plain", "Not found"); });
   server.begin();
 
@@ -844,11 +937,7 @@ void setup() {
 // ============================================================
 void loop() {
   server.handleClient();
-  int i = 0;
-  while (i <= 20) {
-    muxRS485();
-    i++;
-  }
+
   // Process queued test requests (tests run in main loop, not in HTTP handler)
   if (!testRunning) {
     if (pendingAll) {
